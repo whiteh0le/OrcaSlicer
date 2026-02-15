@@ -8,6 +8,7 @@
 #include <jerror.h>
 #include <vector>
 #include <boost/algorithm/string.hpp>
+#include <boost/endian/conversion.hpp>
 
 namespace Slic3r::GCodeThumbnails {
 
@@ -41,6 +42,12 @@ struct CompressedColPic : CompressedImageBuffer
 {
     ~CompressedColPic() override { free(data); }
     std::string_view tag() const override { return "thumbnail_QIDI"sv; }
+};
+
+struct CompressedMKS : CompressedImageBuffer
+{
+    ~CompressedMKS() override { free(data); }
+    std::string_view tag() const override { return "thumbnail_MKS"sv; }
 };
 
 std::unique_ptr<CompressedImageBuffer> compress_thumbnail_png(const ThumbnailData &data)
@@ -119,61 +126,49 @@ std::unique_ptr<CompressedImageBuffer> compress_thumbnail_qoi(const ThumbnailDat
     return out;
 }
 
+std::vector<unsigned short> get_pixels_in_rgb565(const ThumbnailData& data, int width, int height);
 int ColPic_EncodeStr(unsigned short* fromcolor16, int picw, int pich, unsigned char* outputdata, int outputmaxtsize, int colorsmax);
+std::tuple<int, int> get_clamped_thumbnail_resolution(const ThumbnailData& data);
 
 std::unique_ptr<CompressedImageBuffer> compress_thumbnail_colpic(const ThumbnailData &data)
 {
-    const int MAX_SIZE = 512;
-    int width = int(data.width);
-    int height = int(data.height);
+    auto [width, height] = get_clamped_thumbnail_resolution(data);
 
-    // Orca: cap data size to MAX_SIZE while maintaining aspect ratio
-    if (width > MAX_SIZE || height > MAX_SIZE) {
-        double aspectRatio = static_cast<double>(width) / height;
-        if (aspectRatio > 1.0) {
-            width = MAX_SIZE;
-            height = static_cast<int>(MAX_SIZE / aspectRatio);
-        } else {
-            height = MAX_SIZE;
-            width = static_cast<int>(MAX_SIZE * aspectRatio);
-        }
-    }
-
-    std::vector<unsigned short> color16_buf(width * height);
-    std::vector<unsigned char> output_buf(height * width * 10);
-
-    std::vector<uint8_t> rgba_pixels(data.pixels.size() * 4);
-    size_t               row_size = width * 4;
-    for (size_t y = 0; y < height; ++y)
-        memcpy(rgba_pixels.data() + y * row_size, data.pixels.data() + y * row_size, row_size);
-    const unsigned char* pixels;
-    pixels = (const unsigned char*) rgba_pixels.data();
-    int r = 0, g = 0, b = 0, a = 0, rgb = 0;
-    int time = width * height - 1;
-    for (int row = 0; row < height; ++row) {
-        int rr = row * width;
-        for (int col = 0; col < width; ++col) {
-            const int pix_idx = 4 * (rr + width - col - 1);
-            r                 = int(pixels[pix_idx]) >> 3;
-            g                 = int(pixels[pix_idx + 1]) >> 2;
-            b                 = int(pixels[pix_idx + 2]) >> 3;
-            a                 = int(pixels[pix_idx + 3]);
-            if (a == 0) {
-                r = 46 >> 3;
-                g = 51 >> 2;
-                b = 72 >> 3;
-            }
-            rgb             = (r << 11) | (g << 5) | b;
-            color16_buf[time--] = rgb;
-        }
-    }
-
+    std::vector<unsigned short> color16_buf = get_pixels_in_rgb565(data, width, height);
+    std::vector<unsigned char>  output_buf(height * width * 10);
     ColPic_EncodeStr(color16_buf.data(), width, height, output_buf.data(), output_buf.size(), 1024);
 
     auto out  = std::make_unique<CompressedColPic>();
     out->size = output_buf.size();
     out->data = malloc(out->size);
     ::memcpy(out->data, output_buf.data(), out->size);
+    return out;
+}
+
+std::unique_ptr<CompressedImageBuffer> compress_thumbnail_mks_tft(const ThumbnailData &data)
+{
+    auto [width, height] = get_clamped_thumbnail_resolution(data);
+
+    std::vector<unsigned short> color16_buf = get_pixels_in_rgb565(data, width, height);
+    std::stringstream out_data;
+    for (unsigned int ypos = 0; ypos < height; ++ypos) {
+        std::stringstream line;
+        for (unsigned int xpos = 0; xpos < width; ++xpos) {
+            line << rjust(get_hex(boost::endian::native_to_big(color16_buf[ypos * height + xpos])), 4, '0');
+        }
+        out_data << line.str() << "\r" << "M10086 ;";
+        line.clear();
+    }
+    out_data << "\r";
+
+    auto out  = std::make_unique<CompressedMKS>();
+
+    // get the output size of the data
+    // add 9 bytes to the width to account for M10086 ;\r
+    // add 2 bytes for the final \r and 0 of the c_str
+    out->size = height * (width * 4 + 9) + 2;
+    out->data = malloc(out->size);
+    ::memcpy(out->data, (const void*) out_data.str().c_str(), out->size);
     return out;
 }
 
@@ -256,6 +251,8 @@ std::unique_ptr<CompressedImageBuffer> compress_thumbnail(const ThumbnailData &d
         return compress_thumbnail_btt_tft(data);
     case GCodeThumbnailsFormat::ColPic:
         return compress_thumbnail_colpic(data);
+    case GCodeThumbnailsFormat::MKS_TFT:
+        return compress_thumbnail_mks_tft(data);
     }
 }
 
@@ -527,6 +524,59 @@ int ColPic_EncodeStr(unsigned short* fromcolor16, int picw, int pich, unsigned c
     outputdata[qty] = 0;
     return qty;
 }
+
+std::vector<unsigned short> get_pixels_in_rgb565(const ThumbnailData& data, int width, int height)
+{
+    std::vector<unsigned short> color16_buf(width * height);
+    std::vector<uint8_t> rgba_pixels(data.pixels.size() * 4);
+    size_t               row_size = width * 4;
+    for (size_t y = 0; y < height; ++y)
+        memcpy(rgba_pixels.data() + y * row_size, data.pixels.data() + y * row_size, row_size);
+    const unsigned char* pixels;
+    pixels = (const unsigned char*) rgba_pixels.data();
+    int r = 0, g = 0, b = 0, a = 0, rgb = 0;
+    int time = width * height - 1;
+    for (int row = 0; row < height; ++row) {
+        int rr = row * width;
+        for (int col = 0; col < width; ++col) {
+            const int pix_idx = 4 * (rr + width - col - 1);
+            r                 = int(pixels[pix_idx]) >> 3;
+            g                 = int(pixels[pix_idx + 1]) >> 2;
+            b                 = int(pixels[pix_idx + 2]) >> 3;
+            a                 = int(pixels[pix_idx + 3]);
+            if (a == 0) {
+                r = 46 >> 3;
+                g = 51 >> 2;
+                b = 72 >> 3;
+            }
+            rgb                 = (r << 11) | (g << 5) | b;
+            color16_buf[time--] = rgb;
+        }
+    }
+
+    return color16_buf;
+}
+
+std::tuple<int, int> get_clamped_thumbnail_resolution(const ThumbnailData& data) {
+    const int MAX_SIZE = 512;
+    int       width    = int(data.width);
+    int       height   = int(data.height);
+
+    // Orca: cap data size to MAX_SIZE while maintaining aspect ratio
+    if (width > MAX_SIZE || height > MAX_SIZE) {
+        double aspectRatio = static_cast<double>(width) / height;
+        if (aspectRatio > 1.0) {
+            width  = MAX_SIZE;
+            height = static_cast<int>(MAX_SIZE / aspectRatio);
+        } else {
+            height = MAX_SIZE;
+            width  = static_cast<int>(MAX_SIZE * aspectRatio);
+        }
+    }
+
+    return std::make_tuple(width, height);
+}
+
 std::pair<GCodeThumbnailDefinitionsList, ThumbnailErrors> make_and_check_thumbnail_list(const std::string& thumbnails_string, const std::string_view def_ext /*= "PNG"sv*/)
 {
     if (thumbnails_string.empty())

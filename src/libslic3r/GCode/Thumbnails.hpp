@@ -53,6 +53,7 @@ inline void export_thumbnails_to_file(ThumbnailsGeneratorCallback&              
         return;
     short i = 0;
     bool first_ColPic = true;
+    bool first_MKS = true;
     for (const auto& [format, size] : thumbnails_list) {
         static constexpr const size_t max_row_length = 78;
         ThumbnailsList                thumbnails     = thumbnail_cb(ThumbnailsParams{{size}, true, true, true, true, plate_id});
@@ -74,7 +75,11 @@ inline void export_thumbnails_to_file(ThumbnailsGeneratorCallback&              
                             output((boost::format("\n\n;simage:%s\n\n") % reinterpret_cast<char*>(compressed->data)).str().c_str());
                         }
                         first_ColPic = false;
-                    } 
+                    }
+                    else if (format == GCodeThumbnailsFormat::MKS_TFT) {
+                        output((boost::format(first_MKS ? ";simage:%s" : ";;gimage:%s") % reinterpret_cast<char*>(compressed->data)).str().c_str());
+                        first_MKS = false;
+                    }
                     else {
                         output("; THUMBNAIL_BLOCK_START\n");
                         std::string encoded;
