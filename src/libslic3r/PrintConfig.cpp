@@ -6601,7 +6601,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back("QOI");
     def->enum_labels.push_back("BTT TT");
     def->enum_labels.push_back("ColPic");
-    def->enum_labels.push_back("MKS_TFT");
+    def->enum_labels.push_back("MKS TFT");
     def->set_default_value(new ConfigOptionEnum<GCodeThumbnailsFormat>(GCodeThumbnailsFormat::PNG));
 
     def = this->add("use_relative_e_distances", coBool);
